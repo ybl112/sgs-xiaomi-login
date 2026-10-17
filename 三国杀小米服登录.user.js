@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.2.5
+// @version      0.2.6
+// @updateURL    https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
+// @downloadURL  https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
 // @match        https://web.sanguosha.com/*
 // @match        http://game.xiaomi.com/oauthcallback/mioauth*
@@ -18,9 +20,11 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_removeValueChangeListener
 // @grant        GM_registerMenuCommand
+// @grant        GM_openInTab
 // @connect      account.migc.g.mi.com
 // @connect      anysdk.dobest.cn
 // @connect      10th-sdk-login.sanguosha.com
+// @connect      raw.githubusercontent.com
 // ==/UserScript==
 
 (() => {
@@ -245,6 +249,10 @@ const XiaomiCore = (() => {
   const ACCOUNT_CONTEXT = 'sgs-xiaomi-account-context';
   const OWNER_CONTEXT = 'sgs-xiaomi-window-owner';
   const LOGIN_PAGE = 'https://web.sanguosha.com/login/10th_client/index.html';
+  const VERSION = '0.2.6';
+  const UPDATE_URL = 'https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/' + encodeURIComponent('三国杀小米服登录.user.js');
+  const UPDATE_STATE = 'sgs-xiaomi-update-v1';
+  const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
   // UI changes apply only to this document; each new page starts shown at the top right.
   GM_deleteValue('sgs-xiaomi-panel-prefs'); // Discard the legacy persistent preference.
   let panelState = {hidden: false, left: null, top: null};
@@ -259,6 +267,7 @@ const XiaomiCore = (() => {
   let selectedProfileId = null, accountInfo, accountOpen, accountEdit, accountRemove, accountEditor, aliasInput, zoneInput;
   let editingProfileId = null, removingProfileId = null;
   let accountInspect, accountDetails, accountDetailsText, inspectingProfileId = null;
+  let checkUpdateButton, updateTask = null, deferredUpdate = null;
   const linkedWindows = new Map();
   const ownedWindows = new Set();
   let ownerName = '';
@@ -348,6 +357,94 @@ const XiaomiCore = (() => {
     return;
   }
   if (location.origin !== 'https://web.sanguosha.com') return;
+
+  function versionParts(value) {
+    return typeof value === 'string' && /^\d{1,6}(?:\.\d{1,6}){1,3}$/.test(value) ? value.split('.').map(Number) : null;
+  }
+  function newerVersion(value) {
+    const remote = versionParts(value), local = versionParts(VERSION);
+    if (!remote) return false;
+    for (let i = 0; i < Math.max(remote.length, local.length); i++) {
+      const difference = (remote[i] || 0) - (local[i] || 0);
+      if (difference) return difference > 0;
+    }
+    return false;
+  }
+  function updateState() {
+    const saved = GM_getValue(UPDATE_STATE, null) || {};
+    return {version: versionParts(saved.version) ? saved.version : '',
+      openedVersion: versionParts(saved.openedVersion) ? saved.openedVersion : '',
+      checkedAt: Number.isFinite(saved.checkedAt) ? saved.checkedAt : 0,
+      attemptAt: Number.isFinite(saved.attemptAt) ? saved.attemptAt : 0};
+  }
+  function openUpdate(version, force = false) {
+    if (!newerVersion(version)) return false;
+    if (active) { deferredUpdate = {version, force}; return false; }
+    const saved = updateState();
+    if (!force && saved.openedVersion === version) return false;
+    // Reserve before opening so other game windows don't open the same update again.
+    GM_setValue(UPDATE_STATE, {...saved, openedVersion: version});
+    try {
+      GM_openInTab(UPDATE_URL + '?version=' + encodeURIComponent(version), {active: true, setParent: true});
+      return true;
+    } catch (_) {
+      const current = updateState();
+      if (current.openedVersion === version) GM_setValue(UPDATE_STATE, {...current, openedVersion: saved.openedVersion});
+      if (force) status('暂时无法打开更新页，请稍后再试。');
+      return false;
+    }
+  }
+  function fetchUpdateVersion() {
+    return new Promise((resolve, reject) => {
+      let done = false, handle;
+      const finish = (error, version) => {
+        if (done) return; done = true; clearTimeout(timer);
+        error ? reject(new Error('更新检查失败')) : resolve(version);
+      };
+      const timer = setTimeout(() => { finish(true); if (handle) handle.abort(); }, 15000);
+      try {
+        handle = GM_xmlhttpRequest({method: 'GET', url: UPDATE_URL + '?check=' + Math.floor(Date.now() / 60000),
+          anonymous: true, redirect: 'error', timeout: 12000, nocache: true,
+          onload(response) {
+            try {
+              const final = new URL(response.finalUrl || UPDATE_URL), expected = new URL(UPDATE_URL);
+              if (response.status !== 200 || final.origin !== expected.origin || final.pathname !== expected.pathname
+                || final.username || final.password || typeof response.responseText !== 'string') return finish(true);
+              const text = response.responseText, end = text.indexOf('// ==/UserScript==');
+              if (!text.startsWith('// ==UserScript==') || end < 0 || end > 8192) return finish(true);
+              const header = text.slice(0, end);
+              const match = header.match(/^\/\/[ \t]+@version[ \t]+([^\s]+)[ \t]*\r?$/m);
+              if (!/^\/\/[ \t]+@namespace[ \t]+local\.sgs\.xiaomi\.browser[ \t]*\r?$/m.test(header)
+                || !match || !versionParts(match[1])) return finish(true);
+              finish(false, match[1]);
+            } catch (_) { finish(true); }
+          }, onerror: () => finish(true), ontimeout: () => finish(true), onabort: () => finish(true)});
+      } catch (_) { finish(true); }
+    });
+  }
+  async function checkUpdates(force = false) {
+    if (updateTask) { try { await updateTask; } catch (_) {} return; }
+    if (force && active) return;
+    const saved = updateState(), now = Date.now();
+    if (!force) {
+      if (saved.version && saved.checkedAt <= now && now - saved.checkedAt < UPDATE_INTERVAL) return openUpdate(saved.version);
+      if (saved.attemptAt > 0 && saved.attemptAt <= now && now - saved.attemptAt < 10 * 60 * 1000) return;
+    }
+    GM_setValue(UPDATE_STATE, {...saved, attemptAt: now});
+    if (checkUpdateButton) { checkUpdateButton.disabled = true; checkUpdateButton.textContent = '检查中…'; }
+    updateTask = fetchUpdateVersion();
+    try {
+      const version = await updateTask;
+      GM_setValue(UPDATE_STATE, {...updateState(), version, checkedAt: Date.now()});
+      if (newerVersion(version)) openUpdate(version, force);
+      else if (force) status('当前已是最新版本（' + VERSION + '）。');
+    } catch (_) {
+      if (force) status('暂时无法检查更新，请检查网络后重试。');
+    } finally {
+      updateTask = null;
+      if (checkUpdateButton) { checkUpdateButton.disabled = !!active; checkUpdateButton.textContent = '检查更新'; }
+    }
+  }
 
   accounts = XiaomiCore.createAccountStore({get: GM_getValue, set: GM_setValue, remove: GM_deleteValue, keys: GM_listValues}, () => Date.now(), randomId);
   try {
@@ -591,6 +688,7 @@ const XiaomiCore = (() => {
   function busy(value) {
     if (loginButton) loginButton.disabled = value;
     if (alternateLoginButton) alternateLoginButton.disabled = value;
+    if (checkUpdateButton) checkUpdateButton.disabled = value || !!updateTask;
     if (retryLoginButton) retryLoginButton.hidden = value || !duplicateRetry;
     if (cancelButton) cancelButton.hidden = !value;
     if (importArea) importArea.hidden = !value;
@@ -682,6 +780,7 @@ const XiaomiCore = (() => {
       context.controller.abort();
       GM_deleteValue(pendingKey(context.state)); GM_deleteValue(resultKey(context.state));
       active = null; busy(false);
+      if (deferredUpdate) { const pendingUpdate = deferredUpdate; deferredUpdate = null; openUpdate(pendingUpdate.version, pendingUpdate.force); }
     }
   }
   function manual(raw) {
@@ -837,10 +936,12 @@ const XiaomiCore = (() => {
       logNode = document.createElement('pre'); logNode.textContent = log.map(item => item.status).join('\n'); diagnostics.appendChild(logNode);
       const download = document.createElement('button'); download.className = 'minor'; download.textContent = '导出诊断';
       download.onclick = () => {
-        const url = URL.createObjectURL(new Blob([JSON.stringify({version: '0.2.5', scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
+        const url = URL.createObjectURL(new Blob([JSON.stringify({version: VERSION, scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
         const link = document.createElement('a'); link.href = url; link.download = '小米服浏览器诊断.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       }; diagnostics.appendChild(download); content.appendChild(diagnostics);
-      const note = document.createElement('small'); note.textContent = '0.2.5 · 账号记录会保留，小框状态每次重置'; content.appendChild(note);
+      checkUpdateButton = document.createElement('button'); checkUpdateButton.className = 'minor'; checkUpdateButton.textContent = '检查更新';
+      checkUpdateButton.onclick = () => checkUpdates(true); content.appendChild(checkUpdateButton);
+      const note = document.createElement('small'); note.textContent = VERSION + ' · 账号记录会保留，小框状态每次重置'; content.appendChild(note);
     }
     document.body.appendChild(host);
     if (!callbackOnly) {
@@ -858,5 +959,6 @@ const XiaomiCore = (() => {
     for (const key of GM_listValues()) if (key.startsWith(PREFIX)) GM_deleteValue(key);
     sessionStorage.removeItem(LAUNCH); status('临时授权记录已清除；游戏内退出请使用游戏自带功能。');
   });
-  ready(() => panel());
+  ready(() => { panel(); checkUpdates(); });
+  setInterval(() => checkUpdates(), UPDATE_INTERVAL);
 })();
