@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.2.4
+// @version      0.2.5
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
 // @match        https://web.sanguosha.com/*
 // @match        http://game.xiaomi.com/oauthcallback/mioauth*
@@ -249,8 +249,8 @@ const XiaomiCore = (() => {
   GM_deleteValue('sgs-xiaomi-panel-prefs'); // Discard the legacy persistent preference.
   let panelState = {hidden: false, left: null, top: null};
   const log = [];
-  let stateText = '点击“小米服登录”，在小米官方页面完成授权。';
-  let statusNode, logNode, loginButton, cancelButton, importArea, active = null;
+  let stateText = '方式一：原授权页；方式二：可选择微信等方式的小米官方标准登录页。';
+  let statusNode, logNode, loginButton, alternateLoginButton, cancelButton, importArea, active = null;
   let consumedLaunch = false;
   let panelHost = null;
   let accounts = null, expectedProfileId = null, currentProfileId = null, accountPhase = 'waiting';
@@ -366,8 +366,8 @@ const XiaomiCore = (() => {
         if (entry.profileId) {
           expectedProfileId = entry.profileId;
           sessionStorage.setItem(ACCOUNT_CONTEXT, expectedProfileId);
-          status('已绑定所选账号，请点击“小米服登录”，在小米授权页选择对应账号。');
-        } else status('这是新的账号窗口，请点击“小米服登录”添加账号。');
+          status('已绑定所选账号，请使用“登录方式一”或“登录方式二”，在小米官方页面选择对应账号。');
+        } else status('这是新的账号窗口，请使用“登录方式一”或“登录方式二”添加账号。');
       }
     } else {
       const savedId = sessionStorage.getItem(ACCOUNT_CONTEXT);
@@ -451,7 +451,7 @@ const XiaomiCore = (() => {
       if (!response || !validTime(response.expires)) return;
       finish(response.focused ? '已返回原账号窗口。' : '原窗口已收到请求，但浏览器没有切换焦点。请从浏览器标签或任务栏切到原窗口；新版创建的账号窗口可直接返回。');
     });
-    const timer = setTimeout(() => finish('未能定位原窗口。若它已关闭或掉线，可直接点“小米服登录”重新授权。'), 2000);
+    const timer = setTimeout(() => finish('未能定位原窗口。若它已关闭或掉线，可选择登录方式重新授权。'), 2000);
     for (const record of live) if (record.instance) GM_setValue(PREFIX + 'focus:' + record.instance, {expires: Date.now() + 10000, reply: nonce});
     status('正在请求原账号窗口显示…');
   }
@@ -590,6 +590,7 @@ const XiaomiCore = (() => {
   }
   function busy(value) {
     if (loginButton) loginButton.disabled = value;
+    if (alternateLoginButton) alternateLoginButton.disabled = value;
     if (retryLoginButton) retryLoginButton.hidden = value || !duplicateRetry;
     if (cancelButton) cancelButton.hidden = !value;
     if (importArea) importArea.hidden = !value;
@@ -620,7 +621,7 @@ const XiaomiCore = (() => {
       context.controller.signal.addEventListener('abort', cancel, {once: true});
     });
   }
-  async function begin(retryProfileId = null) {
+  async function begin(retryProfileId = null, loginMethod = 1) {
     if (active) return;
     if (entryError) return status('账号窗口入口已过期，请从账号列表重新打开。');
     duplicateRetry = null;
@@ -630,6 +631,10 @@ const XiaomiCore = (() => {
     const authorization = new URL('https://account.xiaomi.com/oauth2/authorize');
     authorization.search = new URLSearchParams({client_id: '2882303761517516898', response_type: 'code', scope: '1 3',
       redirect_uri: 'http://game.xiaomi.com/oauthcallback/mioauth', state: context.state}).toString();
+    // The OAuth-specific form hides social sign-in. Use Xiaomi's standard login
+    // form, then let its official callback continue this exact OAuth request.
+    const loginEntry = new URL('https://account.xiaomi.com/pass/serviceLogin');
+    loginEntry.search = new URLSearchParams({sid: 'passport', callback: authorization.href}).toString();
     try {
       const waiting = waitForCode(context);
       waiting.catch(() => {}); // Also handle cancellation before the popup has opened.
@@ -641,15 +646,17 @@ const XiaomiCore = (() => {
         throw new Error('浏览器拦截了登录窗口，请允许此官网弹出窗口后重试');
       }
       context.popup.opener = null;
-      context.popup.location.replace(authorization.href);
-      status('请在新窗口完成小米官方授权；完成后会自动回到游戏接入流程。');
+      context.popup.location.replace(loginMethod === 2 ? loginEntry.href : authorization.href);
+      status(loginMethod === 2
+        ? '请在小米官方标准登录页选择微信等方式登录；完成后会自动继续游戏授权。若需换号，请先使用“切换小米账号”。'
+        : '请在新窗口完成小米官方授权；完成后会自动回到游戏接入流程。');
       let code = await waiting;
       if (context.popup) { try { context.popup.close(); } catch (_) {} }
       const args = await XiaomiCore.connect(code, status, context.controller.signal, async identity => {
         const targetProfileId = expectedProfileId || (typeof retryProfileId === 'string' ? retryProfileId : null);
         if (targetProfileId && identity.id !== targetProfileId) throw new Error('授权账号与所选账号不一致，已停止接入。请先点“切换小米账号”换号，再授权。');
         if (retryProfileId !== identity.id && await probeAccountWindows(identity.id, context.controller.signal)) {
-          duplicateRetry = {id: identity.id};
+          duplicateRetry = {id: identity.id, loginMethod};
           throw new Error('该账号的其他游戏窗口仍有响应。可返回原窗口；若它未登录或已掉线，请点“仍在此窗口登录”重新授权。');
         }
         if (context.controller.signal.aborted) throw new Error('已取消');
@@ -678,7 +685,7 @@ const XiaomiCore = (() => {
     }
   }
   function manual(raw) {
-    if (!active || !active.accept) return status('请先点击“小米服登录”。');
+    if (!active || !active.accept) return status('请先点击“登录方式一”或“登录方式二”。');
     try {
       const data = XiaomiCore.callback(raw, active.state);
       active.accept({...data, expires: Date.now() + 30000});
@@ -743,12 +750,16 @@ const XiaomiCore = (() => {
     }
     statusNode = document.createElement('p'); statusNode.textContent = stateText; statusNode.setAttribute('role', 'status'); content.appendChild(statusNode);
     if (!callbackOnly) {
-      loginButton = document.createElement('button'); loginButton.textContent = consumedLaunch ? '重新授权' : '小米服登录'; loginButton.onclick = () => begin(); content.appendChild(loginButton);
+      loginButton = document.createElement('button'); loginButton.textContent = '登录方式一';
+      loginButton.title = '打开原小米官方游戏授权页'; loginButton.onclick = () => begin(); content.appendChild(loginButton);
+      alternateLoginButton = document.createElement('button'); alternateLoginButton.textContent = '登录方式二';
+      alternateLoginButton.title = '先打开小米官方标准登录页，可选择微信等登录方式';
+      alternateLoginButton.onclick = () => begin(null, 2); content.appendChild(alternateLoginButton);
       retryLoginButton = document.createElement('button'); retryLoginButton.className = 'minor'; retryLoginButton.textContent = '仍在此窗口登录'; retryLoginButton.hidden = !duplicateRetry;
       retryLoginButton.title = '重新授权同一账号，服务器可能使原窗口下线';
       retryLoginButton.onclick = () => {
-        if (!duplicateRetry) { retryLoginButton.hidden = true; return status('请先点击“小米服登录”。'); }
-        return begin(duplicateRetry.id);
+        if (!duplicateRetry) { retryLoginButton.hidden = true; return status('请先点击“登录方式一”或“登录方式二”。'); }
+        return begin(duplicateRetry.id, duplicateRetry.loginMethod);
       }; content.appendChild(retryLoginButton);
       currentAccountNode = document.createElement('small'); currentAccountNode.className = 'account-info'; content.appendChild(currentAccountNode);
       const manager = document.createElement('details'); manager.open = true;
@@ -826,10 +837,10 @@ const XiaomiCore = (() => {
       logNode = document.createElement('pre'); logNode.textContent = log.map(item => item.status).join('\n'); diagnostics.appendChild(logNode);
       const download = document.createElement('button'); download.className = 'minor'; download.textContent = '导出诊断';
       download.onclick = () => {
-        const url = URL.createObjectURL(new Blob([JSON.stringify({version: '0.2.4', scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
+        const url = URL.createObjectURL(new Blob([JSON.stringify({version: '0.2.5', scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
         const link = document.createElement('a'); link.href = url; link.download = '小米服浏览器诊断.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       }; diagnostics.appendChild(download); content.appendChild(diagnostics);
-      const note = document.createElement('small'); note.textContent = '0.2.4 · 账号记录会保留，小框状态每次重置'; content.appendChild(note);
+      const note = document.createElement('small'); note.textContent = '0.2.5 · 账号记录会保留，小框状态每次重置'; content.appendChild(note);
     }
     document.body.appendChild(host);
     if (!callbackOnly) {
