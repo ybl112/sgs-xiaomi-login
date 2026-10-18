@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.3.0
+// @version      0.3.1
 // @updateURL    https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @downloadURL  https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
@@ -266,7 +266,7 @@ const XiaomiCore = (() => {
   const ACCOUNT_CONTEXT = 'sgs-xiaomi-account-context';
   const OWNER_CONTEXT = 'sgs-xiaomi-window-owner';
   const LOGIN_PAGE = 'https://web.sanguosha.com/login/10th_client/index.html';
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
   const UPDATE_URL = 'https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/' + encodeURIComponent('三国杀小米服登录.user.js');
   const UPDATE_STATE = 'sgs-xiaomi-update-v1';
   const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
@@ -276,7 +276,8 @@ const XiaomiCore = (() => {
   const log = [];
   let stateText = '选择一种登录方式，在小米官方页面完成授权。';
   let statusNode, logNode, loginButton, alternateLoginButton, switchXiaomiButton, cancelButton, importArea, active = null;
-  let loginGridNode, loginHintNode;
+  let loginGridNode, loginHintNode, loginSectionNode;
+  let selectedAccountSection, accountEmptyNode, accountRecentNode;
   let addAccountButton, addLoginMethod;
   const SESSION_PREFIX = 'sgs-xiaomi-sessions-v1:';
   let accountClear, accountReauthorize, accountMoreNode;
@@ -560,7 +561,7 @@ const XiaomiCore = (() => {
   const activePhases = ['connected', 'loading', 'authorizing'];
   function renderLoginVisibility() {
     const loggedIn = consumedLaunch && accountPhase === 'connected';
-    for (const node of [loginButton, alternateLoginButton, loginGridNode, loginHintNode]) if (node) node.hidden = loggedIn;
+    for (const node of [loginButton, alternateLoginButton, loginGridNode, loginHintNode, loginSectionNode]) if (node) node.hidden = loggedIn;
   }
   function setAccountPhase(phase) { accountPhase = phase; phaseStartedAt = Date.now(); renderLoginVisibility(); }
   function heartbeat() {
@@ -679,6 +680,8 @@ const XiaomiCore = (() => {
     const profiles = accounts.profiles();
     if (accountCountNode) accountCountNode.textContent = profiles.length + ' 个账号';
     accountsView.hidden = !profiles.length;
+    if (selectedAccountSection) selectedAccountSection.hidden = !profiles.length;
+    if (accountEmptyNode) accountEmptyNode.hidden = !!profiles.length;
     if (accountActionsNode) accountActionsNode.hidden = !profiles.length;
     if (accountMoreNode) accountMoreNode.hidden = !profiles.length;
     const data = profiles.map(profile => ({profile, live: accounts.live(profile.id).map(item => item.phase), ready: !!savedSession(profile.id)}));
@@ -727,7 +730,8 @@ const XiaomiCore = (() => {
       accountOpen.textContent = own ? (active ? '正在处理…' : consumedLaunch && !['failed', 'disconnected'].includes(accountPhase) ? '当前游戏窗口' : '登录此账号') : live.length ? '返回已有窗口' : savedSession(profile.id) ? '登录所选账号' : '打开账号窗口';
       accountOpen.disabled = own && (!!active || (consumedLaunch && !['failed', 'disconnected'].includes(accountPhase)));
       const recent = profile.lastLoginAt ? new Date(profile.lastLoginAt).toLocaleString('zh-CN', {hour12: false}) : '尚未确认游戏登录';
-      accountInfo.textContent = '已选：' + accounts.label(profile) + '\n最近游戏登录：' + recent;
+      accountInfo.textContent = '已选：' + accounts.label(profile);
+      accountRecentNode.textContent = '最近游戏登录：' + recent;
     } else accountInfo.textContent = '还没有保存的账号。点击“添加账号”，在小米官方窗口登录并授权。';
     updateAccountHeading();
   }
@@ -900,7 +904,7 @@ const XiaomiCore = (() => {
       status(addOnly
         ? '请在小米登录窗口登录并授权要添加的账号。授权后只保存账号记录；当前游戏窗口保持原账号。'
         : loginMethod === 2
-        ? '请在小米官方标准登录页选择微信等方式登录；完成后会自动继续游戏授权。若需换号，请先使用“切换小米账号”。'
+        ? '请在小米官方标准登录页选择微信等方式登录；完成后会自动继续游戏授权。若需换号，请先使用“退出小米网页登录”。'
         : '请在新窗口完成小米官方授权；完成后会自动回到游戏接入流程。');
       let code = await waiting;
       if (context.popup) { try { context.popup.close(); } catch (_) {} }
@@ -919,7 +923,7 @@ const XiaomiCore = (() => {
       }
       const args = await XiaomiCore.connect(code, status, context.controller.signal, async identity => {
         const targetProfileId = expectedProfileId || (typeof retryProfileId === 'string' ? retryProfileId : null);
-        if (targetProfileId && identity.id !== targetProfileId) throw new Error('授权账号与所选账号不一致，已停止接入。请先点“切换小米账号”换号，再授权。');
+        if (targetProfileId && identity.id !== targetProfileId) throw new Error('授权账号与所选账号不一致，已停止接入。请先点“退出小米网页登录”换号，再授权。');
         if (retryProfileId !== identity.id && await probeAccountWindows(identity.id, context.controller.signal)) {
           duplicateRetry = {id: identity.id, loginMethod};
           throw new Error('该账号的其他游戏窗口仍有响应。可返回原窗口；若它未登录或已掉线，请点“仍在此窗口登录”重新授权。');
@@ -1000,32 +1004,27 @@ const XiaomiCore = (() => {
   function panel(callbackOnly = false) {
     const host = document.createElement('div');
     host.id = 'xiaomi-sgs-login-panel';
-    host.style.cssText = 'position:fixed;right:16px;top:16px;width:336px;max-width:calc(100vw - 24px);z-index:2147483647;';
+    host.style.cssText = 'position:fixed;right:16px;top:16px;width:360px;max-width:calc(100vw - 24px);z-index:2147483647;';
     if (!callbackOnly) panelHost = host;
     const root = host.attachShadow({mode: 'closed'});
     const style = document.createElement('style');
     style.textContent = `
       :host{all:initial}:host([hidden]){display:none!important}*{box-sizing:border-box}[hidden]{display:none!important}
-      .box{font:13px/1.65 "Microsoft YaHei",system-ui,sans-serif;color:#e9e4da;background:#201e1b;border:1px solid #7c6846;border-radius:14px;box-shadow:0 16px 48px #0007;overflow:hidden}
-      header{display:flex;align-items:center;gap:8px;padding:13px 14px;border-bottom:1px solid #ffffff0d;background:#29251f;color:#edd6a5}
-      .brand{flex:1;font-weight:700;font-size:15px;letter-spacing:.5px}.header-actions{display:flex;gap:4px}.header-actions button{padding:4px 7px;font-size:11px;background:transparent;color:#bcb19e;border:1px solid #ffffff12}
-      .panel-content{padding:12px;max-height:calc(100vh - 90px);overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}
-      button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:7px;padding:8px 11px;background:#dec18a;color:#292218;transition:background .15s,border-color .15s}
-      button:hover{background:#edd3a2}button:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #e4c58c;outline-offset:2px}
-      button:disabled{opacity:.42;cursor:default}.minor{background:#36312a;border-color:#ffffff0a;color:#d0c6b6;font-size:11px;padding:6px 9px}.minor:hover{background:#443b30}.danger{color:#e8aaa0}
-      .status-card{padding:10px 12px;background:#292620;border:1px solid #d8ba7c22;border-radius:9px;margin-bottom:11px}.status-caption{font-size:11px;font-weight:700;letter-spacing:.6px;color:#c4ad82;display:flex;align-items:center;gap:7px}.status-caption:before{content:"";width:6px;height:6px;background:currentColor;border-radius:50%}
-      .status-card p{font-size:12px;margin:5px 0 0;color:#c5bdaf;overflow-wrap:anywhere;line-height:1.75}.status-card.error{border-color:#dd81734a;background:#392722}.status-card.error .status-caption{color:#f0a196}.status-card.warning .status-caption{color:#e3bd75}.status-card.success .status-caption{color:#9cc9ad}
-      .login-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.login-grid button{font-weight:700}.login-grid .secondary{background:#302b23;color:#e5c993;border-color:#9b805747}.login-grid .secondary:hover{background:#3d3427}.login-hint{display:block;margin:6px 1px 10px;font-size:11px;color:#a89b87}.retry-login{width:100%;margin-bottom:8px}
-      details.section-card{border:1px solid #ffffff10;background:#25221e;border-radius:9px;margin-top:10px;overflow:hidden}summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;padding:10px 11px;font-size:12px;font-weight:700;color:#dbceba;user-select:none}summary::-webkit-details-marker{display:none}summary:after{content:"›";margin-left:auto;color:#9f8d70;font-size:18px;line-height:1;transform:rotate(0deg)}details[open]>summary:after{transform:rotate(90deg)}.section-body{padding:0 10px 10px}.toolbar{display:flex;gap:5px;flex-wrap:wrap}.toolbar button{flex:1 1 auto;white-space:nowrap}.account-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.account-actions .account-open{grid-column:1/-1;background:#443929;color:#e9d0a4}.account-actions>button:last-child{grid-column:1/-1}
-      input,textarea{width:100%;font:inherit;background:#1e1c19;color:#e9e2d6;padding:8px;border:1px solid #68563d;border-radius:6px}input::placeholder{color:#8e8578}.account-info{display:block;white-space:pre-line;overflow-wrap:anywhere;font-size:11px;color:#b0a492;margin:7px 0;line-height:1.75}.accounts{display:block;width:100%;height:91px;overflow:auto;margin:8px 0;background:#1d1b18;color:#e9e2d6;border:1px solid #514533;border-radius:6px;font:12px/1.6 "Microsoft YaHei",sans-serif}.accounts option{padding:5px 7px}.accounts option:checked{background:#51402a;color:#f4dba9}.account-editor input{margin-top:7px;font-size:12px}.account-editor button{margin:7px 5px 0 0}
-      .record-count{margin-left:4px;padding:1px 6px;border-radius:20px;background:#ffffff08;color:#a99c87;font-size:10px;font-weight:400}.record-tools{display:flex;gap:5px;padding:0 10px 8px}.record-tools button{flex:1;font-size:10px;padding:5px 6px}.record-list{list-style:none;padding:0 10px 0 20px;margin:0 0 10px;max-height:210px;overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}
-      .account-add{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;margin-top:2px}.account-add button{font-size:12px;font-weight:700}.add-method{min-width:0;width:100%;background:#1e1c19;color:#d7cab5;border:1px solid #68563d;border-radius:7px;padding:7px;font:11px "Microsoft YaHei",sans-serif}.account-add-hint{display:block;font-size:10px;line-height:1.7;color:#958873;margin:7px 0 10px}
-      .accounts{display:flex;flex-direction:column;gap:6px;height:auto;max-height:230px;overflow:auto;margin:7px 0;background:transparent;border:0;border-radius:0;scrollbar-width:thin}.account-row{display:block;width:100%;flex:none;text-align:left;background:#1e1c19;border:1px solid #ffffff0d;color:#d1c7b7;padding:9px 10px;border-radius:8px}.account-row:hover{background:#30291f;border-color:#a38b5f66}.account-row.selected{background:#3b3021;border-color:#b3945d}.account-row-heading{display:flex;align-items:center;gap:8px}.account-row-name{font-size:12px;font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-row-state{font-size:9px;color:#bcaa8e;white-space:nowrap}.account-row-detail{display:block;font-size:10px;color:#a99a83;margin-top:3px;overflow-wrap:anywhere}.account-refresh{display:block;margin-left:auto;font-size:10px;padding:3px 6px;background:transparent;border:0;color:#a39276}
-      .account-settings{margin-top:12px;border-top:1px solid #ffffff0d}.account-settings summary{padding:9px 0;font-size:10px;color:#978b76}.account-settings>button{width:100%}.account-settings .account-add-hint{margin-bottom:0}
-      .account-more{margin-top:8px}.account-more summary{padding:5px 0;font-size:10px;color:#a99b84}.account-more-actions{display:flex;flex-wrap:wrap;gap:5px;padding-top:4px}.account-more-actions button{flex:1;font-size:10px;padding:5px 6px}.account-actions>button:last-child{grid-column:auto}
-      .record-item{position:relative;border-left:1px solid #514636;padding:0 8px 13px 13px;margin:0}.record-item:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;border-radius:50%;background:#80725c;border:2px solid #25221e}.record-item:last-child{padding-bottom:0;border-left-color:transparent}.record-item.error:before{background:#ef998c}.record-item.warning:before{background:#d5af6b}.record-item.success:before{background:#9bc4a9}.record-item.is-current.progress:before{background:#e2c38a;box-shadow:0 0 0 3px #e2c38a19}
+      .box{font:13px/1.65 "Microsoft YaHei",system-ui,sans-serif;color:#e9e4da;background:#201e1b;border:1px solid #736044;border-radius:13px;box-shadow:0 16px 48px #0007;overflow:hidden}
+      header{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #ffffff0d;background:#29251f;color:#edd6a5}.brand{flex:1;font-weight:700;font-size:14px;letter-spacing:.5px}.header-actions{display:flex;gap:4px}.header-actions button{padding:3px 7px;font-size:10px;background:transparent;color:#bcb19e;border:1px solid #ffffff12}
+      .panel-content{padding:12px;max-height:calc(100vh - 145px);overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}
+      button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:7px;padding:8px 11px;background:#dec18a;color:#292218;transition:background .15s,border-color .15s}button:hover{background:#edd3a2}button:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #e4c58c;outline-offset:2px}button:disabled{opacity:.42;cursor:default}.minor{background:#332e27;border-color:#ffffff10;color:#cfc5b5;font-size:11px;padding:6px 9px}.minor:hover{background:#443b30}.danger{color:#e8aaa0}
+      .status-card{padding:8px 10px;background:#292620;border:1px solid #d8ba7c22;border-radius:8px;margin-bottom:12px}.status-caption{font-size:10px;font-weight:700;letter-spacing:.5px;color:#c4ad82;display:flex;align-items:center;gap:7px}.status-caption:before{content:"";width:5px;height:5px;background:currentColor;border-radius:50%}.status-card p{font-size:11px;margin:4px 0 0;color:#c5bdaf;overflow-wrap:anywhere;line-height:1.75}.status-card.error{border-color:#dd81734a;background:#392722}.status-card.error .status-caption{color:#f0a196}.status-card.warning .status-caption{color:#e3bd75}.status-card.success .status-caption{color:#9cc9ad}
+      .section-label{display:block;font-size:10px;font-weight:600;color:#a99a80;margin:0 0 6px}.login-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.login-grid button{font-size:12px;font-weight:700}.login-grid .secondary{background:#302b23;color:#e5c993;border-color:#9b805747}.login-grid .secondary:hover{background:#3d3427}.login-hint{display:block;margin:5px 0 0;font-size:10px;color:#958975}.current-account{display:block;font-size:10px;color:#c5b393;margin:7px 0 0;overflow-wrap:anywhere}.retry-login{width:100%;margin-top:8px}
+      details.section-card{border:1px solid #ffffff10;background:#25221e;border-radius:9px;margin-top:11px;overflow:hidden}summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;padding:8px 11px;font-size:12px;font-weight:700;color:#dbceba;user-select:none}summary::-webkit-details-marker{display:none}summary:after{content:"›";margin-left:auto;color:#9f8d70;font-size:17px;line-height:1;transform:rotate(0deg)}details[open]>summary:after{transform:rotate(90deg)}.section-body{padding:2px 10px 10px}.record-count{margin-left:3px;padding:1px 6px;border-radius:20px;background:#ffffff08;color:#a99c87;font-size:10px;font-weight:400}
+      .account-add{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}.account-add button{font-size:11px;font-weight:700;padding:7px 12px}.add-method{min-width:0;width:100%;background:#1e1c19;color:#d7cab5;border:1px solid #68563d;border-radius:7px;padding:7px;font:11px "Microsoft YaHei",sans-serif}.account-add-hint{display:block;font-size:10px;line-height:1.7;color:#958873;margin:5px 0 12px}
+      .account-list-heading{display:flex;align-items:center;justify-content:space-between;margin:10px 0 5px}.account-list-heading .section-label{margin:0}.account-refresh{font-size:10px;padding:2px 0;background:transparent;border:0;color:#a39276}.account-refresh:hover{color:#e4c894;background:transparent}.accounts{display:flex;flex-direction:column;gap:6px;max-height:208px;overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}
+      .account-row{display:block;width:100%;flex:none;text-align:left;background:#1e1c19;border:1px solid #ffffff0d;color:#d1c7b7;padding:7px 9px;border-radius:7px}.account-row:hover{background:#30291f;border-color:#a38b5f66}.account-row.selected{background:#3b3021;border-color:#b3945d}.account-row-heading{display:flex;align-items:center;gap:8px}.account-row-name{font-size:12px;font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-row-state{font-size:9px;color:#bcaa8e;white-space:nowrap}.account-row-detail{display:block;font-size:10px;color:#a99a83;margin-top:2px;overflow-wrap:anywhere}
+      .selected-account{margin-top:8px;padding-top:7px;border-top:1px solid #ffffff0c}.account-info{display:block;white-space:pre-line;overflow-wrap:anywhere;font-size:11px;color:#c4b598;margin:0 0 7px}.account-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}.account-actions .account-open{font-size:12px;font-weight:700;padding:7px 10px}.account-empty{font-size:11px;color:#9d907b;margin:10px 0 4px}.account-more{margin-top:8px}.account-more summary{padding:4px 0;font-size:10px;font-weight:400;color:#a99b84}.account-recent{display:block;font-size:10px;color:#8f8370;margin:5px 0 7px}.account-more-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.account-more-actions button{text-align:left;font-size:11px;padding:7px 9px;background:#2e2923;border:1px solid #ffffff0a}.account-more-actions button:hover{background:#3b3228}
+      input,textarea{width:100%;font:inherit;background:#1e1c19;color:#e9e2d6;padding:8px;border:1px solid #68563d;border-radius:6px}input::placeholder{color:#8e8578}.account-editor{padding:3px 0 5px}.account-editor input{margin-top:7px;font-size:12px}.account-editor button{margin:7px 5px 0 0}
+      .record-tools{display:flex;gap:5px;padding:0 10px 8px}.record-tools button{flex:1;font-size:10px;padding:5px 6px}.record-list{list-style:none;padding:0 10px 0 20px;margin:0 0 10px;max-height:200px;overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}.record-item{position:relative;border-left:1px solid #514636;padding:0 8px 13px 13px;margin:0}.record-item:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;border-radius:50%;background:#80725c;border:2px solid #25221e}.record-item:last-child{padding-bottom:0;border-left-color:transparent}.record-item.error:before{background:#ef998c}.record-item.warning:before{background:#d5af6b}.record-item.success:before{background:#9bc4a9}.record-item.is-current.progress:before{background:#e2c38a;box-shadow:0 0 0 3px #e2c38a19}
       .record-meta{display:flex;align-items:center;justify-content:space-between;font-size:10px;color:#8f8371;font-variant-numeric:tabular-nums}.record-badge{font-size:9px;color:#9f927c}.record-item.is-current .record-badge{color:#dfc38e}.record-item.error .record-badge,.record-item.error .record-message{color:#edaa9e}.record-item.success .record-badge{color:#a4c4ae}.record-message{font-size:11px;color:#bdb3a3;line-height:1.8;margin-top:3px;overflow-wrap:anywhere}.record-item.is-current .record-message{color:#eee1ca}.record-item.error.is-current .record-message{color:#edaa9e}.record-empty{font-size:11px;color:#958875;padding:8px 0 12px;line-height:1.8}
-      .panel-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:11px}.panel-footer small{color:#92836b;font-size:10px}.panel-footer button{font-size:10px}.manual-entry{margin:9px 0}.manual-entry small{display:block;font-size:11px;color:#b5a68d;margin-bottom:7px}.manual-entry button{margin-top:7px}.cancel-login{margin-top:8px;width:100%}
+      .panel-footer{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:9px 12px;border-top:1px solid #ffffff0d;background:#25211c}.panel-footer small{color:#92836b;font-size:10px}.footer-actions{display:flex;align-items:center;gap:9px}.panel-footer button{font-size:10px;padding:4px 6px}.footer-link{background:transparent;border:0;color:#978c7a;padding:4px 0!important}.footer-link:hover{background:transparent;color:#d7c5a7}.manual-entry{margin:9px 0}.manual-entry small{display:block;font-size:11px;color:#b5a68d;margin-bottom:7px}.manual-entry button{margin-top:7px}.cancel-login{margin-top:8px;width:100%}
     `;
     root.appendChild(style);
     const box = document.createElement('section'); box.className = 'box'; root.appendChild(box);
@@ -1070,20 +1069,22 @@ const XiaomiCore = (() => {
     statusCaption = document.createElement('div'); statusCaption.className = 'status-caption'; statusCard.appendChild(statusCaption);
     statusNode = document.createElement('p'); statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite'); statusCard.appendChild(statusNode); renderStatus();
     if (!callbackOnly) {
-      const loginGrid = document.createElement('div'); loginGridNode = loginGrid; loginGrid.className = 'login-grid'; content.appendChild(loginGrid);
+      loginSectionNode = document.createElement('div'); loginSectionNode.className = 'login-section'; content.appendChild(loginSectionNode);
+      const loginTitle = document.createElement('small'); loginTitle.className = 'section-label'; loginTitle.textContent = '小米官方登录'; loginSectionNode.appendChild(loginTitle);
+      const loginGrid = document.createElement('div'); loginGridNode = loginGrid; loginGrid.className = 'login-grid'; loginSectionNode.appendChild(loginGrid);
       loginButton = document.createElement('button'); loginButton.textContent = '登录方式一';
       loginButton.title = '打开原小米官方游戏授权页'; loginButton.onclick = () => begin(); loginGrid.appendChild(loginButton);
       alternateLoginButton = document.createElement('button'); alternateLoginButton.textContent = '登录方式二';
       alternateLoginButton.className = 'secondary'; alternateLoginButton.title = '先打开小米官方标准登录页，可选择微信等登录方式';
       alternateLoginButton.onclick = () => begin(null, 2); loginGrid.appendChild(alternateLoginButton);
-      const loginHint = document.createElement('small'); loginHintNode = loginHint; loginHint.className = 'login-hint'; loginHint.textContent = '方式一 · 原入口　／　方式二 · 微信等方式'; content.appendChild(loginHint);
+      const loginHint = document.createElement('small'); loginHintNode = loginHint; loginHint.className = 'login-hint'; loginHint.textContent = '方式一：原授权入口　方式二：支持微信等方式'; loginSectionNode.appendChild(loginHint);
       retryLoginButton = document.createElement('button'); retryLoginButton.className = 'minor retry-login'; retryLoginButton.textContent = '仍在此窗口登录'; retryLoginButton.hidden = !duplicateRetry;
       retryLoginButton.title = '重新授权同一账号，服务器可能使原窗口下线';
       retryLoginButton.onclick = () => {
         if (!duplicateRetry) { retryLoginButton.hidden = true; return status('请先点击“登录方式一”或“登录方式二”。'); }
         return begin(duplicateRetry.id, duplicateRetry.loginMethod);
       }; content.appendChild(retryLoginButton);
-      currentAccountNode = document.createElement('small'); currentAccountNode.className = 'account-info'; content.appendChild(currentAccountNode);
+      currentAccountNode = document.createElement('small'); currentAccountNode.className = 'current-account'; content.appendChild(currentAccountNode);
       const manager = document.createElement('details'); manager.className = 'section-card'; manager.open = false;
       const managerTitle = document.createElement('summary'); manager.appendChild(managerTitle);
       const managerLabel = document.createElement('span'); managerLabel.textContent = '账号管理'; managerTitle.appendChild(managerLabel);
@@ -1095,15 +1096,15 @@ const XiaomiCore = (() => {
         const option = document.createElement('option'); option.value = value; option.textContent = text; addLoginMethod.appendChild(option);
       }
       addLoginMethod.value = '2'; accountToolbar.appendChild(addLoginMethod);
-      const add = document.createElement('button'); addAccountButton = add; add.textContent = '添加账号'; add.onclick = () => openAccountWindow(); accountToolbar.appendChild(add);
-      const addHint = document.createElement('small'); addHint.className = 'account-add-hint'; addHint.textContent = '授权后保存登录凭据，再从列表选择账号进入游戏。'; managerBody.appendChild(addHint);
+      const add = document.createElement('button'); addAccountButton = add; add.textContent = '添加账号'; add.title = '在小米官方窗口授权并保存凭据，不自动进入游戏或退出原账号'; add.onclick = () => openAccountWindow(); accountToolbar.appendChild(add);
+      const listHeading = document.createElement('div'); listHeading.className = 'account-list-heading'; managerBody.appendChild(listHeading);
+      const listTitle = document.createElement('small'); listTitle.className = 'section-label'; listTitle.textContent = '选择账号'; listHeading.appendChild(listTitle);
+      const refresh = document.createElement('button'); refresh.className = 'minor account-refresh'; refresh.textContent = '刷新列表'; refresh.onclick = () => renderAccounts(true); listHeading.appendChild(refresh);
       accountsView = document.createElement('div'); accountsView.className = 'accounts'; accountsView.setAttribute('role', 'group');
       accountsView.setAttribute('aria-label', '已保存的账号，点击选择'); managerBody.appendChild(accountsView);
-      const refresh = document.createElement('button'); refresh.className = 'minor account-refresh'; refresh.textContent = '刷新列表'; refresh.onclick = () => renderAccounts(true); managerBody.appendChild(refresh);
-      const loginSettings = document.createElement('details'); loginSettings.className = 'account-settings';
-      const loginSettingsTitle = document.createElement('summary'); loginSettingsTitle.textContent = '小米网页登录设置'; loginSettings.appendChild(loginSettingsTitle);
-      const switchXiaomi = document.createElement('button'); switchXiaomiButton = switchXiaomi; switchXiaomi.className = 'minor'; switchXiaomi.textContent = '切换小米账号';
-      switchXiaomi.title = '先退出小米网页账号，再进入官方登录页；登录其他账号后返回游戏窗口授权';
+      accountEmptyNode = document.createElement('p'); accountEmptyNode.className = 'account-empty'; accountEmptyNode.textContent = '还没有保存的账号，先在上方添加。'; managerBody.appendChild(accountEmptyNode);
+      const switchXiaomi = document.createElement('button'); switchXiaomiButton = switchXiaomi; switchXiaomi.className = 'footer-link'; switchXiaomi.textContent = '退出小米网页登录';
+      switchXiaomi.title = '退出小米网站的登录状态并打开登录页；不清除账号列表里已保存的游戏凭据';
       switchXiaomi.onclick = () => {
         if (active) return status('请先完成或取消当前授权，再切换小米账号。');
         // Use Xiaomi's own logout chain to clear its web SSO cookies across domains.
@@ -1112,11 +1113,11 @@ const XiaomiCore = (() => {
         if (!popup) return status('浏览器拦截了小米账号窗口，请允许弹出窗口后重试。');
         popup.opener = null; popup.location.replace(xiaomiLogoutURL('https://account.xiaomi.com/pass/serviceLogin?sid=passport'));
         status('已打开小米官方退出流程，将清理旧网页登录并进入登录页。添加账号无需使用此操作。');
-      }; loginSettings.appendChild(switchXiaomi);
-      const settingsHint = document.createElement('small'); settingsHint.className = 'account-add-hint'; settingsHint.textContent = '此操作会退出小米网页账号；“添加账号”不会执行退出。普通窗口共享小米网站登录状态。'; loginSettings.appendChild(settingsHint);
-      accountInfo = document.createElement('small'); accountInfo.className = 'account-info'; managerBody.appendChild(accountInfo);
-      const accountActions = document.createElement('div'); accountActionsNode = accountActions; accountActions.className = 'account-actions'; managerBody.appendChild(accountActions);
-      accountOpen = document.createElement('button'); accountOpen.className = 'minor account-open';
+      };
+      selectedAccountSection = document.createElement('div'); selectedAccountSection.className = 'selected-account'; managerBody.appendChild(selectedAccountSection);
+      accountInfo = document.createElement('small'); accountInfo.className = 'account-info'; selectedAccountSection.appendChild(accountInfo);
+      const accountActions = document.createElement('div'); accountActionsNode = accountActions; accountActions.className = 'account-actions'; selectedAccountSection.appendChild(accountActions);
+      accountOpen = document.createElement('button'); accountOpen.className = 'account-open';
       accountOpen.onclick = () => openAccountWindow(selectedProfileId); accountActions.appendChild(accountOpen);
       accountEdit = document.createElement('button'); accountEdit.className = 'minor'; accountEdit.textContent = '修改备注';
       accountEdit.onclick = () => {
@@ -1130,19 +1131,21 @@ const XiaomiCore = (() => {
         if (removingProfileId !== profile.id) { removingProfileId = profile.id; editingProfileId = null; renderAccounts(true); return; }
         clearSession(profile.id); accounts.remove(profile.id); editingProfileId = removingProfileId = null;
         renderAccounts(true); status('所选账号的本地记录已移除，已打开的游戏不会退出。');
-      }; accountActions.appendChild(accountRemove);
+      };
       accountInspect = document.createElement('button'); accountInspect.className = 'minor'; accountInspect.textContent = '查看账号信息';
       accountInspect.onclick = () => {
         inspectingProfileId = inspectingProfileId === selectedProfileId ? null : selectedProfileId; renderAccounts(true);
       };
-      const more = document.createElement('details'); accountMoreNode = more; more.className = 'account-more'; managerBody.appendChild(more);
-      const moreTitle = document.createElement('summary'); moreTitle.textContent = '账号详情与授权'; more.appendChild(moreTitle);
+      const more = document.createElement('details'); accountMoreNode = more; more.className = 'account-more';
+      const moreTitle = document.createElement('summary'); moreTitle.textContent = '更多操作'; more.appendChild(moreTitle);
+      accountRecentNode = document.createElement('small'); accountRecentNode.className = 'account-recent'; more.appendChild(accountRecentNode);
       const moreActions = document.createElement('div'); moreActions.className = 'account-more-actions'; more.appendChild(moreActions);
-      moreActions.appendChild(accountInspect);
       accountReauthorize = document.createElement('button'); accountReauthorize.className = 'minor'; accountReauthorize.textContent = '重新授权';
       accountReauthorize.onclick = () => { const id = selectedProfileId; if (accounts.get(id)) return begin(null, Number(addLoginMethod.value), true, id); }; moreActions.appendChild(accountReauthorize);
+      moreActions.appendChild(accountInspect);
       accountClear = document.createElement('button'); accountClear.className = 'minor'; accountClear.textContent = '清除登录凭据';
       accountClear.onclick = () => { if (active || !accounts.get(selectedProfileId)) return; clearSession(selectedProfileId); renderAccounts(true); status('所选账号的已保存登录凭据已清除；账号记录和当前游戏保留。'); }; moreActions.appendChild(accountClear);
+      moreActions.appendChild(accountRemove);
       accountDetails = document.createElement('div'); accountDetails.hidden = true;
       accountDetailsText = document.createElement('textarea'); accountDetailsText.readOnly = true;
       accountDetailsText.setAttribute('aria-label', '账号信息（不含登录凭据）');
@@ -1169,7 +1172,7 @@ const XiaomiCore = (() => {
       }; accountEditor.appendChild(save);
       const cancelEdit = document.createElement('button'); cancelEdit.className = 'minor'; cancelEdit.textContent = '取消修改';
       cancelEdit.onclick = () => { editingProfileId = null; renderAccounts(true); }; accountEditor.appendChild(cancelEdit);
-      managerBody.appendChild(accountEditor); managerBody.appendChild(loginSettings); content.appendChild(manager);
+      selectedAccountSection.appendChild(accountEditor); selectedAccountSection.appendChild(more); content.appendChild(manager);
       cancelButton = document.createElement('button'); cancelButton.textContent = '取消'; cancelButton.className = 'minor cancel-login'; cancelButton.hidden = true;
       cancelButton.onclick = () => { if (active) { active.controller.abort(); try { active.popup.close(); } catch (_) {} } }; content.appendChild(cancelButton);
       importArea = document.createElement('details'); importArea.className = 'manual-entry'; importArea.hidden = true;
@@ -1194,10 +1197,12 @@ const XiaomiCore = (() => {
         const url = URL.createObjectURL(new Blob([JSON.stringify({version: VERSION, scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
         const link = document.createElement('a'); link.href = url; link.download = '小米服浏览器诊断.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       }; recordTools.appendChild(download); diagnostics.appendChild(logNode); content.appendChild(diagnostics); renderHistory();
-      const footer = document.createElement('div'); footer.className = 'panel-footer'; content.appendChild(footer);
+      const footer = document.createElement('div'); footer.className = 'panel-footer'; box.appendChild(footer);
       checkUpdateButton = document.createElement('button'); checkUpdateButton.className = 'minor'; checkUpdateButton.textContent = '检查更新';
       checkUpdateButton.onclick = () => checkUpdates(true);
-      const note = document.createElement('small'); note.textContent = 'v' + VERSION + ' · 本机账号管理'; footer.appendChild(note); footer.appendChild(checkUpdateButton);
+      const note = document.createElement('small'); note.textContent = 'v' + VERSION; footer.appendChild(note);
+      const footerActions = document.createElement('div'); footerActions.className = 'footer-actions'; footer.appendChild(footerActions);
+      footerActions.appendChild(switchXiaomi); footerActions.appendChild(checkUpdateButton);
     }
     document.body.appendChild(host);
     if (!callbackOnly) {
