@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.2.7
+// @version      0.2.8
 // @updateURL    https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @downloadURL  https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
@@ -249,7 +249,7 @@ const XiaomiCore = (() => {
   const ACCOUNT_CONTEXT = 'sgs-xiaomi-account-context';
   const OWNER_CONTEXT = 'sgs-xiaomi-window-owner';
   const LOGIN_PAGE = 'https://web.sanguosha.com/login/10th_client/index.html';
-  const VERSION = '0.2.7';
+  const VERSION = '0.2.8';
   const UPDATE_URL = 'https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/' + encodeURIComponent('三国杀小米服登录.user.js');
   const UPDATE_STATE = 'sgs-xiaomi-update-v1';
   const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
@@ -258,7 +258,7 @@ const XiaomiCore = (() => {
   let panelState = {hidden: false, left: null, top: null};
   const log = [];
   let stateText = '选择一种登录方式，在小米官方页面完成授权。';
-  let statusNode, logNode, loginButton, alternateLoginButton, cancelButton, importArea, active = null;
+  let statusNode, logNode, loginButton, alternateLoginButton, switchXiaomiButton, cancelButton, importArea, active = null;
   let consumedLaunch = false;
   let panelHost = null;
   let accounts = null, expectedProfileId = null, currentProfileId = null, accountPhase = 'waiting';
@@ -735,6 +735,7 @@ const XiaomiCore = (() => {
   function busy(value) {
     if (loginButton) loginButton.disabled = value;
     if (alternateLoginButton) alternateLoginButton.disabled = value;
+    if (switchXiaomiButton) switchXiaomiButton.disabled = value;
     if (checkUpdateButton) checkUpdateButton.disabled = value || !!updateTask;
     if (retryLoginButton) retryLoginButton.hidden = value || !duplicateRetry;
     if (cancelButton) cancelButton.hidden = !value;
@@ -937,12 +938,18 @@ const XiaomiCore = (() => {
       const accountToolbar = document.createElement('div'); accountToolbar.className = 'toolbar'; managerBody.appendChild(accountToolbar);
       const add = document.createElement('button'); add.className = 'minor'; add.textContent = '添加账号（新窗口）'; add.onclick = () => openAccountWindow(); accountToolbar.appendChild(add);
       const refresh = document.createElement('button'); refresh.className = 'minor'; refresh.textContent = '刷新列表'; refresh.onclick = () => renderAccounts(true); accountToolbar.appendChild(refresh);
-      const switchXiaomi = document.createElement('button'); switchXiaomi.className = 'minor'; switchXiaomi.textContent = '切换小米账号';
-      switchXiaomi.title = '打开小米官方账号页，换号后再回本窗口授权';
+      const switchXiaomi = document.createElement('button'); switchXiaomiButton = switchXiaomi; switchXiaomi.className = 'minor'; switchXiaomi.textContent = '切换小米账号';
+      switchXiaomi.title = '先退出小米网页账号，再进入官方登录页；登录其他账号后返回游戏窗口授权';
       switchXiaomi.onclick = () => {
-        const popup = window.open('https://account.xiaomi.com/', 'xiaomi-sgs-account-switch', 'width=560,height=780');
+        if (active) return status('请先完成或取消当前授权，再切换小米账号。');
+        // Use Xiaomi's own logout chain to clear its web SSO cookies across domains.
+        // Do not delete game-window bindings or account-manager records.
+        const logout = new URL('https://account.xiaomi.com/pass/logout');
+        logout.search = new URLSearchParams({callback: 'https://account.xiaomi.com/pass/serviceLogin?sid=passport'}).toString();
+        const popup = window.open('about:blank', 'xiaomi-sgs-account-switch-' + randomId(), 'width=560,height=780');
         if (!popup) return status('浏览器拦截了小米账号窗口，请允许弹出窗口后重试。');
-        popup.opener = null; status('请在小米官方账号页自行换号，完成后回到所选窗口重新授权。');
+        popup.opener = null; popup.location.replace(logout.href);
+        status('已打开小米官方退出流程，将清理旧登录并进入登录页。请登录其他小米账号，再回到目标游戏窗口选择登录方式授权；添加新账号请使用“添加账号（新窗口）”。');
       }; accountToolbar.appendChild(switchXiaomi);
       accountsView = document.createElement('select'); accountsView.className = 'accounts'; accountsView.size = 3;
       accountsView.setAttribute('aria-label', '选择要管理的账号');
