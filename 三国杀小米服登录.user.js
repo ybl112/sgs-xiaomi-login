@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.2.8
+// @version      0.2.9
 // @updateURL    https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @downloadURL  https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
@@ -247,9 +247,10 @@ const XiaomiCore = (() => {
   const LAUNCH = PREFIX + 'launch';
   const GAME = 'https://web.sanguosha.com/x/pc/index.php';
   const ACCOUNT_CONTEXT = 'sgs-xiaomi-account-context';
+  const FRESH_LOGIN_CONTEXT = 'sgs-xiaomi-fresh-login';
   const OWNER_CONTEXT = 'sgs-xiaomi-window-owner';
   const LOGIN_PAGE = 'https://web.sanguosha.com/login/10th_client/index.html';
-  const VERSION = '0.2.8';
+  const VERSION = '0.2.9';
   const UPDATE_URL = 'https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/' + encodeURIComponent('三国杀小米服登录.user.js');
   const UPDATE_STATE = 'sgs-xiaomi-update-v1';
   const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
@@ -259,6 +260,7 @@ const XiaomiCore = (() => {
   const log = [];
   let stateText = '选择一种登录方式，在小米官方页面完成授权。';
   let statusNode, logNode, loginButton, alternateLoginButton, switchXiaomiButton, cancelButton, importArea, active = null;
+  let loginGridNode, loginHintNode;
   let consumedLaunch = false;
   let panelHost = null;
   let accounts = null, expectedProfileId = null, currentProfileId = null, accountPhase = 'waiting';
@@ -497,7 +499,7 @@ const XiaomiCore = (() => {
       const nonce = fragment.get('sgs-xiaomi-window');
       const key = PREFIX + 'window:' + nonce;
       const entry = /^[a-f0-9]{32}$/.test(nonce || '') ? GM_getValue(key, null) : null;
-      GM_deleteValue(key); sessionStorage.removeItem(LAUNCH); sessionStorage.removeItem(ACCOUNT_CONTEXT); sessionStorage.removeItem(OWNER_CONTEXT);
+      GM_deleteValue(key); sessionStorage.removeItem(LAUNCH); sessionStorage.removeItem(ACCOUNT_CONTEXT); sessionStorage.removeItem(OWNER_CONTEXT); sessionStorage.removeItem(FRESH_LOGIN_CONTEXT);
       history.replaceState(null, '', location.pathname + location.search);
       if (!entry || !validTime(entry.expires) || (entry.profileId && !accounts.get(entry.profileId))) {
         entryError = true; status('账号窗口入口已过期，请从账号列表重新打开。');
@@ -508,7 +510,10 @@ const XiaomiCore = (() => {
           expectedProfileId = entry.profileId;
           sessionStorage.setItem(ACCOUNT_CONTEXT, expectedProfileId);
           status('已绑定所选账号，请使用“登录方式一”或“登录方式二”，在小米官方页面选择对应账号。');
-        } else status('这是新的账号窗口，请使用“登录方式一”或“登录方式二”添加账号。');
+        } else {
+          sessionStorage.setItem(FRESH_LOGIN_CONTEXT, '1');
+          status('这是新的账号窗口。选择登录方式后，会先退出旧小米网页账号，再登录并授权新账号。');
+        }
       }
     } else {
       const savedId = sessionStorage.getItem(ACCOUNT_CONTEXT);
@@ -521,7 +526,11 @@ const XiaomiCore = (() => {
 
   function profileName(profile) { return 'sgs-xiaomi-profile-' + profile.windowKey; }
   const activePhases = ['connected', 'loading', 'authorizing'];
-  function setAccountPhase(phase) { accountPhase = phase; phaseStartedAt = Date.now(); }
+  function renderLoginVisibility() {
+    const loggedIn = consumedLaunch && accountPhase === 'connected';
+    for (const node of [loginButton, alternateLoginButton, loginGridNode, loginHintNode]) if (node) node.hidden = loggedIn;
+  }
+  function setAccountPhase(phase) { accountPhase = phase; phaseStartedAt = Date.now(); renderLoginVisibility(); }
   function heartbeat() {
     const id = currentProfileId || expectedProfileId;
     if (['connected', 'disconnected'].includes(accountPhase)) {
@@ -629,9 +638,10 @@ const XiaomiCore = (() => {
     ownedWindows.add(child);
     child.location.replace(LOGIN_PAGE + '#sgs-xiaomi-window=' + nonce);
     if (id) linkedWindows.set(id, child);
-    status('账号窗口已打开；请在新窗口完成小米官方授权。');
+    status(id ? '账号窗口已打开；请在新窗口完成小米官方授权。' : '新账号窗口已打开；选择登录方式后会自动退出旧小米网页账号，再授权新账号。');
   }
   function renderAccounts(force = false) {
+    renderLoginVisibility();
     if (!accountsView || !accounts) return;
     const profiles = accounts.profiles();
     if (accountCountNode) accountCountNode.textContent = profiles.length + ' 个账号';
@@ -767,6 +777,11 @@ const XiaomiCore = (() => {
       context.controller.signal.addEventListener('abort', cancel, {once: true});
     });
   }
+  function xiaomiLogoutURL(callback) {
+    const logout = new URL('https://account.xiaomi.com/pass/logout');
+    logout.search = new URLSearchParams({callback}).toString();
+    return logout.href;
+  }
   async function begin(retryProfileId = null, loginMethod = 1) {
     if (active) return;
     if (entryError) return status('账号窗口入口已过期，请从账号列表重新打开。');
@@ -792,8 +807,12 @@ const XiaomiCore = (() => {
         throw new Error('浏览器拦截了登录窗口，请允许此官网弹出窗口后重试');
       }
       context.popup.opener = null;
-      context.popup.location.replace(loginMethod === 2 ? loginEntry.href : authorization.href);
-      status(loginMethod === 2
+      const freshLogin = sessionStorage.getItem(FRESH_LOGIN_CONTEXT) === '1';
+      const target = loginMethod === 2 ? loginEntry.href : authorization.href;
+      context.popup.location.replace(freshLogin ? xiaomiLogoutURL(target) : target);
+      status(freshLogin
+        ? '正在通过小米官方流程退出旧网页登录，随后进入所选登录页。请登录新账号并授权，完成后会自动继续游戏接入。'
+        : loginMethod === 2
         ? '请在小米官方标准登录页选择微信等方式登录；完成后会自动继续游戏授权。若需换号，请先使用“切换小米账号”。'
         : '请在新窗口完成小米官方授权；完成后会自动回到游戏接入流程。');
       let code = await waiting;
@@ -815,6 +834,7 @@ const XiaomiCore = (() => {
       if (context.controller.signal.aborted) throw new Error('已取消');
       // Save only the account identifier from the validated launch response, never its token/sign/ticket.
       accounts.update(currentProfileId, {loginAccount: args.account});
+      sessionStorage.removeItem(FRESH_LOGIN_CONTEXT);
       // A tab-scoped, one-use handoff; no credentials in query strings or persistent GM storage.
       sessionStorage.setItem(LAUNCH, JSON.stringify({expires: Date.now() + 60000, args, profileId: currentProfileId}));
       status('小米服登录准备完成，正在打开官网游戏…');
@@ -916,13 +936,13 @@ const XiaomiCore = (() => {
     statusCaption = document.createElement('div'); statusCaption.className = 'status-caption'; statusCard.appendChild(statusCaption);
     statusNode = document.createElement('p'); statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite'); statusCard.appendChild(statusNode); renderStatus();
     if (!callbackOnly) {
-      const loginGrid = document.createElement('div'); loginGrid.className = 'login-grid'; content.appendChild(loginGrid);
+      const loginGrid = document.createElement('div'); loginGridNode = loginGrid; loginGrid.className = 'login-grid'; content.appendChild(loginGrid);
       loginButton = document.createElement('button'); loginButton.textContent = '登录方式一';
       loginButton.title = '打开原小米官方游戏授权页'; loginButton.onclick = () => begin(); loginGrid.appendChild(loginButton);
       alternateLoginButton = document.createElement('button'); alternateLoginButton.textContent = '登录方式二';
       alternateLoginButton.className = 'secondary'; alternateLoginButton.title = '先打开小米官方标准登录页，可选择微信等登录方式';
       alternateLoginButton.onclick = () => begin(null, 2); loginGrid.appendChild(alternateLoginButton);
-      const loginHint = document.createElement('small'); loginHint.className = 'login-hint'; loginHint.textContent = '方式一 · 原入口　／　方式二 · 微信等方式'; content.appendChild(loginHint);
+      const loginHint = document.createElement('small'); loginHintNode = loginHint; loginHint.className = 'login-hint'; loginHint.textContent = '方式一 · 原入口　／　方式二 · 微信等方式'; content.appendChild(loginHint);
       retryLoginButton = document.createElement('button'); retryLoginButton.className = 'minor retry-login'; retryLoginButton.textContent = '仍在此窗口登录'; retryLoginButton.hidden = !duplicateRetry;
       retryLoginButton.title = '重新授权同一账号，服务器可能使原窗口下线';
       retryLoginButton.onclick = () => {
@@ -944,11 +964,9 @@ const XiaomiCore = (() => {
         if (active) return status('请先完成或取消当前授权，再切换小米账号。');
         // Use Xiaomi's own logout chain to clear its web SSO cookies across domains.
         // Do not delete game-window bindings or account-manager records.
-        const logout = new URL('https://account.xiaomi.com/pass/logout');
-        logout.search = new URLSearchParams({callback: 'https://account.xiaomi.com/pass/serviceLogin?sid=passport'}).toString();
         const popup = window.open('about:blank', 'xiaomi-sgs-account-switch-' + randomId(), 'width=560,height=780');
         if (!popup) return status('浏览器拦截了小米账号窗口，请允许弹出窗口后重试。');
-        popup.opener = null; popup.location.replace(logout.href);
+        popup.opener = null; popup.location.replace(xiaomiLogoutURL('https://account.xiaomi.com/pass/serviceLogin?sid=passport'));
         status('已打开小米官方退出流程，将清理旧登录并进入登录页。请登录其他小米账号，再回到目标游戏窗口选择登录方式授权；添加新账号请使用“添加账号（新窗口）”。');
       }; accountToolbar.appendChild(switchXiaomi);
       accountsView = document.createElement('select'); accountsView.className = 'accounts'; accountsView.size = 3;
