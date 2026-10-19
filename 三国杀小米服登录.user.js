@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         三国杀一将成名 · 小米服登录
 // @namespace    local.sgs.xiaomi.browser
-// @version      0.3.2
+// @version      0.4.0
 // @updateURL    https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @downloadURL  https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/三国杀小米服登录.user.js
 // @description  在三国杀官网使用本人小米账号授权并接入小米服。浏览器测试版。
@@ -256,7 +256,107 @@ const XiaomiCore = (() => {
       label: profile => profile ? profile.alias || profile.roleName || profile.nickname || '小米账号 · ' + profile.id.slice(-4) : '新账号'
     };
   }
-  return {encode, decode, allowed, callback, connect, authorize, connectSaved, installBridge, endpoints, createAccountStore};
+  function createPerformanceController(win, now = () => Date.now()) {
+    // Only the verified Laya stage settings are changed. Never alter clocks, RAF or game timers.
+    let binding = null, previousSample = null, problem = '', graphicsContext = null, graphicsInfo = null;
+    const visible = stage => !win.document?.hidden && stage.visible !== false && stage.isVisibility !== false;
+    function resize(target) {
+      const browser = target.browser;
+      if (!(browser.clientWidth > 0 && browser.clientHeight > 0)) throw new Error('窗口尺寸暂不可用');
+      target.stage.setScreenSize(browser.clientWidth * browser.pixelRatio, browser.clientHeight * browser.pixelRatio);
+    }
+    function restore(target) {
+      if (!target) return;
+      if (target.frameBefore !== null && target.stage.frameRate === 'fast') target.stage.frameRate = target.frameBefore;
+      target.frameBefore = null;
+      if (target.ratioApplied !== null && target.browser._pixelRatio === target.ratioApplied) {
+        target.browser._pixelRatio = target.ratioBefore;
+        try { resize(target); } catch (_) { problem = '原画质已恢复，窗口尺寸等待游戏刷新。'; }
+      }
+      target.ratioApplied = null;
+    }
+    function current() {
+      const engine = win.Laya, stage = engine?.stage;
+      if (!stage || typeof stage.frameRate !== 'string' || !['fast', 'slow', 'mouse', 'sleep'].includes(stage.frameRate)) return null;
+      if (!binding || binding.stage !== stage || binding.browser !== engine.Browser) {
+        restore(binding); previousSample = null;
+        binding = {stage, browser: engine.Browser, frameBefore: null, ratioApplied: null, ratioBefore: null};
+      }
+      return binding;
+    }
+    function apply(settings) {
+      problem = '';
+      const target = current();
+      if (!target) return;
+      const stage = target.stage, browser = target.browser;
+      try {
+        if (!settings.smooth && target.frameBefore !== null) {
+          if (stage.frameRate === 'fast') stage.frameRate = target.frameBefore;
+          target.frameBefore = null;
+        } else if (settings.smooth && visible(stage) && ['slow', 'mouse'].includes(stage.frameRate)) {
+          target.frameBefore = stage.frameRate;
+          stage.frameRate = 'fast';
+        }
+        const scale = [0.75, 0.5].includes(settings.scale) ? settings.scale : 1;
+        if (target.ratioApplied !== null && browser?._pixelRatio !== target.ratioApplied) {
+          // An external setting owns the new ratio; do not restore an obsolete value over it.
+          target.ratioApplied = null;
+        }
+        if (scale === 1) {
+          if (target.ratioApplied !== null) {
+            browser._pixelRatio = target.ratioBefore;
+            target.ratioApplied = null;
+            resize(target);
+          }
+        } else if (visible(stage)) {
+          const descriptor = browser && Object.getOwnPropertyDescriptor(browser, '_pixelRatio');
+          if (!descriptor || !descriptor.writable || typeof stage.setScreenSize !== 'function'
+            || !Number.isFinite(browser.pixelRatio) || browser.pixelRatio <= 0) {
+            problem = '当前引擎不支持调整画质，保留原设置。';
+          } else {
+            const original = target.ratioApplied === null ? browser.pixelRatio : target.ratioBefore;
+            const next = original * scale;
+            if (browser._pixelRatio !== next) {
+              const before = browser._pixelRatio;
+              browser._pixelRatio = next;
+              try { resize(target); }
+              catch (error) { browser._pixelRatio = before; try { resize(target); } catch (_) {} throw error; }
+              target.ratioBefore = original; target.ratioApplied = next;
+            }
+          }
+        }
+      } catch (_) { problem = '流畅度设置未能完整应用，请恢复默认后重试。'; }
+    }
+    function sample() {
+      const target = current();
+      if (!target) { previousSample = null; return {available: false, fps: null, problem}; }
+      const stage = target.stage, count = win.Laya.Stat?.loopCount, time = now();
+      let fps = null;
+      const showing = visible(stage) && stage.renderingEnabled !== false;
+      if (showing && Number.isFinite(count)) {
+        if (previousSample && time - previousSample.time >= 500 && time - previousSample.time <= 5000 && count >= previousSample.count) {
+          fps = Math.round((count - previousSample.count) * 1000 / (time - previousSample.time));
+        }
+        previousSample = {count, time};
+      } else previousSample = null;
+      let canvas;
+      try { canvas = win.Laya.Render?.canvas; } catch (_) {}
+      const context = win.Laya.WebGLContext?.mainContext;
+      if (context && context !== graphicsContext) {
+        graphicsContext = context; graphicsInfo = null;
+        try {
+          const extension = context.getExtension('WEBGL_debug_renderer_info');
+          const renderer = String(context.getParameter(extension ? extension.UNMASKED_RENDERER_WEBGL : context.RENDERER) || '').slice(0, 240);
+          graphicsInfo = {renderer, software: /SwiftShader|llvmpipe|softpipe|software|basic render|swrast|lavapipe/i.test(renderer)};
+        } catch (_) {}
+      }
+      return {available: true, fps, visible: showing, mode: stage.frameRate,
+        width: Number(canvas?.width) || null, height: Number(canvas?.height) || null,
+        scaled: target.ratioApplied !== null, graphics: context ? graphicsInfo : null, problem};
+    }
+    return {apply, sample, resetSample: () => { previousSample = null; }};
+  }
+  return {encode, decode, allowed, callback, connect, authorize, connectSaved, installBridge, endpoints, createAccountStore, createPerformanceController};
 })();
 /* CORE-END */
 
@@ -266,7 +366,7 @@ const XiaomiCore = (() => {
   const ACCOUNT_CONTEXT = 'sgs-xiaomi-account-context';
   const OWNER_CONTEXT = 'sgs-xiaomi-window-owner';
   const LOGIN_PAGE = 'https://web.sanguosha.com/login/10th_client/index.html';
-  const VERSION = '0.3.2';
+  const VERSION = '0.4.0';
   const UPDATE_URL = 'https://raw.githubusercontent.com/ybl112/sgs-xiaomi-login/main/' + encodeURIComponent('三国杀小米服登录.user.js');
   const UPDATE_STATE = 'sgs-xiaomi-update-v1';
   const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
@@ -304,6 +404,7 @@ const XiaomiCore = (() => {
     panelHost.hidden = !visible;
     // The host reset and page CSS can override the browser's default [hidden] rule.
     panelHost.style.setProperty('display', visible ? 'block' : 'none', 'important');
+    if (accounts) syncPerformance();
   }
   function positionPanel(left, top) {
     if (!panelHost) return;
@@ -424,6 +525,42 @@ const XiaomiCore = (() => {
     return;
   }
   if (location.origin !== 'https://web.sanguosha.com') return;
+
+  const PERFORMANCE_KEY = 'sgs-xiaomi-performance-v1';
+  const savedPerformance = GM_getValue(PERFORMANCE_KEY, null);
+  let performanceSettings = {smooth: savedPerformance?.smooth === true, scale: [0.75, 0.5].includes(savedPerformance?.scale) ? savedPerformance.scale : 1};
+  const performanceEngine = XiaomiCore.createPerformanceController(unsafeWindow);
+  const gamePage = location.pathname === '/x/pc/index.php';
+  let performanceDetails, performanceReadout, performanceHint, performanceGPU, smoothChoice, qualityChoice, performanceTimer = null, panelContent;
+  function performanceVisible() { return performanceDetails?.open && panelHost && !panelHost.hidden && !panelContent?.hidden; }
+  function updatePerformance() {
+    if (!gamePage) {
+      if (performanceReadout) performanceReadout.textContent = '进入游戏后显示帧率与显卡信息。';
+      return;
+    }
+    performanceEngine.apply(performanceSettings);
+    if (!performanceVisible()) return;
+    const info = performanceEngine.sample();
+    const mode = {fast: '满帧', slow: '半帧', mouse: '鼠标活动时满帧', sleep: '休眠'}[info.mode] || '未识别';
+    performanceReadout.textContent = !info.available ? '等待游戏引擎加载…' : !info.visible ? '页面在后台或画面未显示，暂停统计。'
+      : '游戏帧率：' + (info.fps === null ? '采样中…' : info.fps + ' FPS') + ' · ' + mode + (info.width && info.height ? '\n渲染尺寸：' + info.width + ' × ' + info.height : '');
+    performanceGPU.textContent = info.graphics?.renderer ? '图形渲染器：' + info.graphics.renderer : '图形渲染器：等待引擎或浏览器未提供型号';
+    performanceHint.textContent = info.problem || (info.graphics?.software ? '检测到软件渲染，可先检查浏览器的图形加速及显卡驱动。'
+      : !info.available ? '设置会在游戏引擎加载后应用。' : info.mode === 'fast' && performanceSettings.smooth ? '已使用满帧模式；若仍卡顿，可降低画质并检查显卡设置。'
+      : '降低画质会让画面变模糊，但可减轻渲染负担。');
+  }
+  function syncPerformance() {
+    if (performanceTimer !== null) { clearInterval(performanceTimer); performanceTimer = null; }
+    performanceEngine.resetSample();
+    updatePerformance();
+    if (gamePage && !document.hidden && (performanceSettings.smooth || performanceSettings.scale !== 1 || performanceVisible())) performanceTimer = setInterval(updatePerformance, 1000);
+  }
+  function savePerformance() {
+    performanceSettings = {smooth: smoothChoice.value === 'fast', scale: Number(qualityChoice.value)};
+    GM_setValue(PERFORMANCE_KEY, performanceSettings); syncPerformance();
+  }
+  document.addEventListener?.('visibilitychange', syncPerformance);
+  window.addEventListener('focus', syncPerformance);
 
   function versionParts(value) {
     return typeof value === 'string' && /^\d{1,6}(?:\.\d{1,6}){1,3}$/.test(value) ? value.split('.').map(Number) : null;
@@ -976,6 +1113,7 @@ const XiaomiCore = (() => {
     } catch (error) { status(/^(不是本次|授权校验|未取得)/.test(error.message) ? error.message : '回调地址格式不正确，请复制小米授权后地址栏的完整地址。'); }
   }
   window.addEventListener('pagehide', () => {
+    clearInterval(performanceTimer); performanceTimer = null;
     clearInterval(accountRefresh); accounts.release(instanceId); GM_removeValueChangeListener(focusListener); GM_removeValueChangeListener(presenceListener);
     GM_deleteValue(PREFIX + 'focus:' + instanceId);
     GM_deleteValue(PREFIX + 'presence:' + instanceId);
@@ -1007,6 +1145,7 @@ const XiaomiCore = (() => {
       input,textarea{width:100%;font:inherit;background:#1e1c19;color:#e9e2d6;padding:8px;border:1px solid #68563d;border-radius:6px}input::placeholder{color:#8e8578}.account-editor{padding:3px 0 5px}.account-editor input{margin-top:7px;font-size:12px}.account-editor button{margin:7px 5px 0 0}
       .record-tools{display:flex;gap:5px;padding:0 10px 8px}.record-tools button{flex:1;font-size:10px;padding:5px 6px}.record-list{list-style:none;padding:0 10px 0 20px;margin:0 0 10px;max-height:200px;overflow:auto;scrollbar-width:thin;scrollbar-color:#68543c transparent}.record-item{position:relative;border-left:1px solid #514636;padding:0 8px 13px 13px;margin:0}.record-item:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;border-radius:50%;background:#80725c;border:2px solid #25221e}.record-item:last-child{padding-bottom:0;border-left-color:transparent}.record-item.error:before{background:#ef998c}.record-item.warning:before{background:#d5af6b}.record-item.success:before{background:#9bc4a9}.record-item.is-current.progress:before{background:#e2c38a;box-shadow:0 0 0 3px #e2c38a19}
       .record-meta{display:flex;align-items:center;justify-content:space-between;font-size:10px;color:#8f8371;font-variant-numeric:tabular-nums}.record-badge{font-size:9px;color:#9f927c}.record-item.is-current .record-badge{color:#dfc38e}.record-item.error .record-badge,.record-item.error .record-message{color:#edaa9e}.record-item.success .record-badge{color:#a4c4ae}.record-message{font-size:11px;color:#bdb3a3;line-height:1.8;margin-top:3px;overflow-wrap:anywhere}.record-item.is-current .record-message{color:#eee1ca}.record-item.error.is-current .record-message{color:#edaa9e}.record-empty{font-size:11px;color:#958875;padding:8px 0 12px;line-height:1.8}
+      .performance-readout{font-size:12px;color:#e4d5b9;white-space:pre-line;margin:3px 0 9px;font-variant-numeric:tabular-nums}.performance-body>label{display:grid;grid-template-columns:60px minmax(0,1fr);align-items:center;gap:8px;font-size:11px;color:#bbae97;margin:7px 0}.performance-hint,.performance-gpu{display:block;font-size:10px;line-height:1.8;color:#9e917c;margin:8px 0;overflow-wrap:anywhere}.performance-gpu{color:#c0b096}
       .panel-footer{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:9px 12px;border-top:1px solid #ffffff0d;background:#25211c}.panel-footer small{color:#92836b;font-size:10px}.footer-actions{display:flex;align-items:center;gap:9px}.panel-footer button{font-size:10px;padding:4px 6px}.footer-link{background:transparent;border:0;color:#978c7a;padding:4px 0!important}.footer-link:hover{background:transparent;color:#d7c5a7}.manual-entry{margin:9px 0}.manual-entry small{display:block;font-size:11px;color:#b5a68d;margin-bottom:7px}.manual-entry button{margin-top:7px}.cancel-login{margin-top:8px;width:100%}
     `;
     root.appendChild(style);
@@ -1015,8 +1154,9 @@ const XiaomiCore = (() => {
     const brand = document.createElement('span'); brand.className = 'brand'; brand.textContent = '一将成名 · 小米服'; header.appendChild(brand);
     const headerActions = document.createElement('div'); headerActions.className = 'header-actions'; header.appendChild(headerActions);
     const content = document.createElement('div'); content.className = 'panel-content';
+    if (!callbackOnly) panelContent = content;
     const collapse = document.createElement('button'); collapse.className = 'minor'; collapse.textContent = '收起';
-    collapse.onclick = () => { content.hidden = !content.hidden; collapse.textContent = content.hidden ? '展开' : '收起'; };
+    collapse.onclick = () => { content.hidden = !content.hidden; collapse.textContent = content.hidden ? '展开' : '收起'; if (!callbackOnly) syncPerformance(); };
     headerActions.appendChild(collapse); box.appendChild(content);
     if (!callbackOnly) {
       const hide = document.createElement('button'); hide.className = 'minor'; hide.textContent = '隐藏';
@@ -1157,6 +1297,32 @@ const XiaomiCore = (() => {
       const cancelEdit = document.createElement('button'); cancelEdit.className = 'minor'; cancelEdit.textContent = '取消修改';
       cancelEdit.onclick = () => { editingProfileId = null; renderAccounts(true); }; accountEditor.appendChild(cancelEdit);
       selectedAccountSection.appendChild(accountEditor); selectedAccountSection.appendChild(more); content.appendChild(manager);
+      performanceDetails = document.createElement('details'); performanceDetails.className = 'section-card'; performanceDetails.open = false;
+      const performanceTitle = document.createElement('summary'); performanceTitle.textContent = '性能选项'; performanceDetails.appendChild(performanceTitle);
+      const performanceBody = document.createElement('div'); performanceBody.className = 'section-body performance-body'; performanceDetails.appendChild(performanceBody);
+      performanceReadout = document.createElement('p'); performanceReadout.className = 'performance-readout'; performanceBody.appendChild(performanceReadout);
+      const smoothLabel = document.createElement('label'); smoothLabel.textContent = '帧率模式'; performanceBody.appendChild(smoothLabel);
+      smoothChoice = document.createElement('select'); smoothChoice.className = 'add-method'; smoothChoice.setAttribute('aria-label', '游戏帧率模式'); smoothLabel.appendChild(smoothChoice);
+      for (const [value, text] of [['original', '跟随游戏（默认）'], ['fast', '优先流畅（满帧）']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = text; smoothChoice.appendChild(option);
+      }
+      smoothChoice.value = performanceSettings.smooth ? 'fast' : 'original'; smoothChoice.onchange = savePerformance;
+      const qualityLabel = document.createElement('label'); qualityLabel.textContent = '渲染画质'; performanceBody.appendChild(qualityLabel);
+      qualityChoice = document.createElement('select'); qualityChoice.className = 'add-method'; qualityChoice.setAttribute('aria-label', '游戏渲染画质'); qualityLabel.appendChild(qualityChoice);
+      for (const [value, text] of [['1', '原画质（默认）'], ['0.75', '流畅画质（75% 分辨率）'], ['0.5', '低画质（50% 分辨率）']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = text; qualityChoice.appendChild(option);
+      }
+      qualityChoice.value = String(performanceSettings.scale); qualityChoice.onchange = savePerformance;
+      performanceHint = document.createElement('small'); performanceHint.className = 'performance-hint'; performanceBody.appendChild(performanceHint);
+      performanceGPU = document.createElement('small'); performanceGPU.className = 'performance-gpu'; performanceBody.appendChild(performanceGPU);
+      const gpuHelp = document.createElement('details'); gpuHelp.className = 'account-more';
+      const gpuTitle = document.createElement('summary'); gpuTitle.textContent = '显卡与低帧率排查'; gpuHelp.appendChild(gpuTitle);
+      const gpuText = document.createElement('p'); gpuText.className = 'performance-hint';
+      gpuText.textContent = '先检查浏览器“系统”设置中的图形加速，修改后按浏览器提示重启。可临时关闭节能模式及不需要的扩展、其他标签页，对比同一游戏场景。Chrome 可在地址栏输入 chrome://gpu，Edge 输入 edge://gpu 查看 WebGL 状态。双显卡电脑可在 Windows 设置 → 系统 → 屏幕 → 图形中，为浏览器选择“高性能”，退出浏览器后重开。显卡由系统分配，脚本无法直接切换。'; gpuHelp.appendChild(gpuText); performanceBody.appendChild(gpuHelp);
+      const resetPerformance = document.createElement('button'); resetPerformance.className = 'minor'; resetPerformance.textContent = '恢复默认画质与帧率';
+      resetPerformance.onclick = () => { smoothChoice.value = 'original'; qualityChoice.value = '1'; savePerformance(); }; performanceBody.appendChild(resetPerformance);
+      const performanceNote = document.createElement('small'); performanceNote.className = 'performance-hint'; performanceNote.textContent = '帧率按可见游戏引擎的更新次数估算，展开时每秒刷新；收起后停止统计。设置保存在本机，原画质与跟随游戏为默认。'; performanceBody.appendChild(performanceNote);
+      performanceDetails.addEventListener('toggle', syncPerformance);
       cancelButton = document.createElement('button'); cancelButton.textContent = '取消'; cancelButton.className = 'minor cancel-login'; cancelButton.hidden = true;
       cancelButton.onclick = () => { if (active) { active.controller.abort(); try { active.popup.close(); } catch (_) {} } }; content.appendChild(cancelButton);
       importArea = document.createElement('details'); importArea.className = 'manual-entry'; importArea.hidden = true;
@@ -1181,6 +1347,7 @@ const XiaomiCore = (() => {
         const url = URL.createObjectURL(new Blob([JSON.stringify({version: VERSION, scope: '阶段提示；不包含账号与会话值', events: log}, null, 2)], {type: 'application/json'}));
         const link = document.createElement('a'); link.href = url; link.download = '小米服浏览器诊断.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       }; recordTools.appendChild(download); diagnostics.appendChild(logNode); content.appendChild(diagnostics); renderHistory();
+      content.appendChild(performanceDetails); syncPerformance();
       const footer = document.createElement('div'); footer.className = 'panel-footer'; box.appendChild(footer);
       checkUpdateButton = document.createElement('button'); checkUpdateButton.className = 'minor'; checkUpdateButton.textContent = '检查更新';
       checkUpdateButton.onclick = () => checkUpdates(true);
